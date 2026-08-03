@@ -34,6 +34,16 @@ def scrape_moneydj_price(etf_code):
                 meta  = result["meta"]
                 price = meta.get("regularMarketPrice")
                 prev  = meta.get("previousClose")
+                if not prev:
+                    prev = meta.get("chartPreviousClose")
+                if not prev:
+                    try:
+                        _closes_prev = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                        _closes_prev = [c for c in _closes_prev if c is not None]
+                        if len(_closes_prev) >= 2:
+                            prev = _closes_prev[-2]
+                    except Exception:
+                        pass
                 if not price or float(price) <= 0:
                     closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
                     closes = [c for c in closes if c is not None]
