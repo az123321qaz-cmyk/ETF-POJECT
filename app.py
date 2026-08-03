@@ -1394,13 +1394,17 @@ def _update_prev_close():
                         _rows = _jd["data"]
                         # 若該月資料最後一列即為「今天」，昨收取倒數第二列；
                         # 若已退回查詢上個月（今天尚無資料），最後一列本身就是最近交易日昨收
-                        if _rows[-1][0] == _today_roc and len(_rows) >= 2:
-                            _prev_close = float(_rows[-2][6].replace(",", ""))
+                        if _rows[-1][0] == _today_roc:
+                            if len(_rows) >= 2:
+                                _prev_close = float(_rows[-2][6].replace(",", ""))
+                                _init_cache[_code] = _prev_close
+                                print(f"[prev_close] 啟動(TWSE) {_code}={_prev_close}")
+                                break
                         else:
                             _prev_close = float(_rows[-1][6].replace(",", ""))
-                        _init_cache[_code] = _prev_close
-                        print(f"[prev_close] 啟動(TWSE) {_code}={_prev_close}")
-                        break
+                            _init_cache[_code] = _prev_close
+                            print(f"[prev_close] 啟動(TWSE) {_code}={_prev_close}")
+                            break
                 _chk = (_chk.replace(day=1) - _tdd(days=1))
         except Exception as _e:
             print(f"[prev_close] 啟動TWSE {_code} 失敗: {_e}")
