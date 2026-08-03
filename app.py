@@ -1381,6 +1381,7 @@ def _update_prev_close():
             import urllib3 as _ul3; _ul3.disable_warnings()
             import requests as _rqs
             _chk = _dtt.utcnow() + _tdd(hours=8)
+            _today_roc = f"{_chk.year-1911}/{_chk.month:02d}/{_chk.day:02d}"
             for _retry in range(3):
                 _ym = _chk.strftime("%Y%m%d")
                 _resp = _rqs.get(
@@ -1389,10 +1390,14 @@ def _update_prev_close():
                     timeout=10, verify=False)
                 if _resp.status_code == 200:
                     _jd = _resp.json()
-                    if _jd.get("stat") == "OK" and _jd.get("data") and len(_jd["data"]) >= 2:
+                    if _jd.get("stat") == "OK" and _jd.get("data"):
                         _rows = _jd["data"]
-                        # 倒數第二列收盤 = 最近一個交易日的昨收
-                        _prev_close = float(_rows[-2][6].replace(",", ""))
+                        # 若該月資料最後一列即為「今天」，昨收取倒數第二列；
+                        # 若已退回查詢上個月（今天尚無資料），最後一列本身就是最近交易日昨收
+                        if _rows[-1][0] == _today_roc and len(_rows) >= 2:
+                            _prev_close = float(_rows[-2][6].replace(",", ""))
+                        else:
+                            _prev_close = float(_rows[-1][6].replace(",", ""))
                         _init_cache[_code] = _prev_close
                         print(f"[prev_close] 啟動(TWSE) {_code}={_prev_close}")
                         break
