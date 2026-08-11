@@ -156,10 +156,36 @@ def load_etf_list():
 def save_etf_list(etf_list):
     """
     儲存 ETF 清單並自動更新 Render 環境變數
+    - 寫入資料庫（若已設定 DATABASE_URL，這是主要且永久的持久化來源）
     - 寫入 JSON 檔（本機開發用）
     - 自動呼叫 Render API 更新 ETF_LIST_JSON 環境變數
     """
     env_str = json.dumps(etf_list, ensure_ascii=False)
+
+    # 寫入資料庫（正式環境的持久化來源，避免刪除/新增後被資料庫舊資料覆蓋）
+    if DATABASE_URL:
+        conn = get_db()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM etf_configs")
+                for e in etf_list:
+                    cur.execute(
+                        "INSERT INTO etf_configs (code, name, issuer, source_key, inception_date) "
+                        "VALUES (%s, %s, %s, %s, %s) "
+                        "ON CONFLICT (code) DO UPDATE SET "
+                        "name=EXCLUDED.name, issuer=EXCLUDED.issuer, "
+                        "source_key=EXCLUDED.source_key, inception_date=EXCLUDED.inception_date",
+                        (e.get("code", ""), e.get("name", ""), e.get("issuer", ""),
+                         e.get("source_key", "etfinfo"), e.get("inception_date") or None)
+                    )
+                conn.commit()
+                print(f"[設定] 資料庫已同步 {len(etf_list)} 檔 ETF")
+            except Exception as e:
+                print(f"[設定] 資料庫寫入失敗: {e}")
+                conn.rollback()
+            finally:
+                conn.close()
 
     # 寫入 JSON 檔（本機開發）
     try:
