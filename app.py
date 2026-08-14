@@ -1504,7 +1504,7 @@ def _scheduled_refresh():
     print("[排程] 持股自動更新排程啟動")
     while True:
         try:
-            now = datetime.now()
+            now = taipei_now()
             if now.weekday() < 5:
                 for code, sch in ETF_ANNOUNCEMENT_SCHEDULE.items():
                     ah, am = sch["announce_hour"], sch["announce_min"]
