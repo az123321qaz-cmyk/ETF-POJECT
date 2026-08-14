@@ -7,7 +7,7 @@ import re
 import json
 from datetime import date, timedelta
 
-from db import get_db
+from db import get_db, taipei_today
 from scrapers.holdings import safe_get
 from bs4 import BeautifulSoup
 
@@ -17,7 +17,7 @@ def save_holdings_snapshot(etf_code, holdings):
     if not holdings:
         return
     try:
-        today = date.today().isoformat()
+        today = taipei_today().isoformat()
         conn = get_db()
         if not conn:
             return
@@ -122,7 +122,7 @@ def seed_period_snapshots(etf_code, holdings):
     """
     if not holdings:
         return
-    today = date.today()
+    today = taipei_today()
     monday = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     if month_start.month == 1:
@@ -222,7 +222,7 @@ def save_changes_snapshot(etf_code, changes):
     if not changes:
         return
     try:
-        trade_date = date.today().isoformat()
+        trade_date = taipei_today().isoformat()
         conn = get_db()
         if not conn:
             return
@@ -238,7 +238,7 @@ def save_changes_snapshot(etf_code, changes):
                     add_count=EXCLUDED.add_count, buy_count=EXCLUDED.buy_count,
                     sell_count=EXCLUDED.sell_count, remove_count=EXCLUDED.remove_count,
                     buy_amount=EXCLUDED.buy_amount, sell_amount=EXCLUDED.sell_amount,
-                    changes_json=EXCLUDED.changes_json
+                    changes_json=EXCLUDED.changes_json, created_at=CURRENT_TIMESTAMP
             """, (
                 etf_code, trade_date,
                 changes.get("date_range",""),
@@ -253,3 +253,38 @@ def save_changes_snapshot(etf_code, changes):
             conn.close()
     except Exception as e:
         print(f"[DB] save_changes_snapshot 失敗: {e}")
+
+
+def get_period_buy_sell_summary(etf_code, period_start, period_end):
+        """彙總期間內加碼/減碼統計（依 etf_changes_history 每日快照加總）。"""
+        empty = {"buy": 0, "sell": 0, "buy_amount": 0.0, "sell_amount": 0.0, "stocks": []}
+        conn = get_db()
+        if not conn:
+            return empty
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT buy_count, sell_count, buy_amount, sell_amount, changes_json
+            FROM etf_changes_history
+            WHERE etf_code=%s AND trade_date >= %s AND trade_date <= %s
+            ORDER BY trade_date ASC
+        """, (etf_code, str(period_start), str(period_end)))
+        rows = cur.fetchall()
+        buy = sum(r[0] or 0 for r in rows)
+        sell = sum(r[1] or 0 for r in rows)
+        buy_amount = sum(float(r[2] or 0) for r in rows)
+        sell_amount = sum(float(r[3] or 0) for r in rows)
+        stocks = []
+        for r in rows:
+            try:
+                stocks += [c for c in json.loads(r[4] or "[]") if c.get("type") in ("加碼", "減碼")]
+            except Exception:
+                pass
+        return {"buy": buy, "sell": sell, "buy_amount": round(buy_amount, 2),
+                "sell_amount": round(sell_amount, 2), "stocks": stocks}
+    except Exception as e:
+        print(f"[DB] get_period_buy_sell_summary 失敗: {e}")
+        return empty
+    finally:
+        conn.close()
+        """, (etf_code, str(period_start), str(period_end)))
