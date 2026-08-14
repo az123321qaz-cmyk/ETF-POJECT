@@ -287,4 +287,3 @@ def get_period_buy_sell_summary(etf_code, period_start, period_end):
         return empty
     finally:
         conn.close()
-        """, (etf_code, str(period_start), str(period_end)))
