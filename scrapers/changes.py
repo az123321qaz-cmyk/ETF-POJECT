@@ -288,6 +288,17 @@ def get_period_buy_sell_summary(etf_code, period_start, period_end):
             ORDER BY trade_date ASC
         """, (etf_code, str(period_start), str(period_end)))
         rows = cur.fetchall()
+        # 過濾掉損壞的快照（異動筆數與明細對不上，例如舊版爬蟲留下的壞資料），避免污染加總
+        valid_rows = []
+        for r in rows:
+            try:
+                row_changes_len = len(json.loads(r[4] or "[]"))
+            except Exception:
+                row_changes_len = 0
+            if ((r[0] or 0) + (r[1] or 0)) > 0 and row_changes_len == 0:
+                continue
+            valid_rows.append(r)
+        rows = valid_rows
         buy = sum(r[0] or 0 for r in rows)
         sell = sum(r[1] or 0 for r in rows)
         buy_amount = sum(float(r[2] or 0) for r in rows)

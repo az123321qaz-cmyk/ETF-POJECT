@@ -947,9 +947,19 @@ def get_etf_changes(etf_code):
                 _row = _dc.fetchone()
                 _use_cache = False
                 if _row:
+                    # 快照完整性檢查：異動筆數與明細不一致（例如舊版爬蟲留下的壞資料）就視為無效，強制重新抓取
+                    _row_counts = sum((_row[i] or 0) for i in range(1, 5))
+                    try:
+                        _row_changes_len = len(json.loads(_row[7] or "[]"))
+                    except Exception:
+                        _row_changes_len = 0
+                    _row_valid = not (_row_counts > 0 and _row_changes_len == 0)
+
                     _sch2 = ETF_ANNOUNCEMENT_SCHEDULE.get(etf_code, {"announce_hour": 16, "announce_min": 30})
                     _ann_dt = taipei_now().replace(hour=_sch2["announce_hour"], minute=_sch2["announce_min"], second=0, microsecond=0)
-                    if taipei_now() < _ann_dt:
+                    if not _row_valid:
+                        _use_cache = False
+                    elif taipei_now() < _ann_dt:
                         _use_cache = True
                     else:
                         _dr_m2 = re.search(r"(\d{4}-\d{2}-\d{2})\s*[→>-]+\s*(\d{4}-\d{2}-\d{2})", _row[0] or "")
