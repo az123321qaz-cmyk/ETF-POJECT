@@ -3,7 +3,6 @@
 - scrape_daily_changes: 從 etfinfo.tw/active 抓取加碼/減碼/新增/刪除明細
 - save_changes_snapshot: 將日報快照寫入 DB etf_changes_history
 """
-import re
 import json
 from datetime import date, timedelta
 
@@ -158,61 +157,80 @@ def seed_period_snapshots(etf_code, holdings):
         conn.close()
 
 
+def _nuxt_resolve(data, ref, depth=0, seen=None):
+    """展開 Nuxt devalue 格式的索引參照為實際巢狀結構。"""
+    if seen is None:
+        seen = set()
+    if depth > 12:
+        return None
+    if isinstance(ref, int) and 0 <= ref < len(data):
+        if ref in seen:
+            return None
+        val = data[ref]
+        if isinstance(val, (str, int, float, bool)) or val is None:
+            return val
+        if isinstance(val, list):
+            return [_nuxt_resolve(data, v, depth + 1, seen | {ref}) for v in val]
+        if isinstance(val, dict):
+            return {k: _nuxt_resolve(data, v, depth + 1, seen | {ref}) for k, v in val.items()}
+        return val
+    return ref
+
+
+_CHANGE_TYPE_LABEL = {"added": "新增", "increased": "加碼", "decreased": "減碼", "removed": "刪除"}
+_CHANGE_TYPE_KEY = {"新增": "add", "加碼": "buy", "減碼": "sell", "刪除": "remove"}
+
+
 def scrape_daily_changes(etf_code):
-    """從 etfinfo.tw/active 抓取最新操作日報"""
+    """
+    從 etfinfo.tw/active 頁面的 __NUXT_DATA__ 解析最新一次持股揭露的異動明細。
+    （改用結構化資料而非頁面文字，避免頁面上其他數字（如天數篩選按鈕）與異動筆數混在一起被誤判）
+    """
     url = f"https://www.etfinfo.tw/etf/{etf_code}/active"
     r = safe_get(url, timeout=12)
     if not r:
         return None
 
     soup = BeautifulSoup(r.text, "html.parser")
+    nuxt = soup.find("script", id="__NUXT_DATA__")
+    if not nuxt or not nuxt.string:
+        return None
+
+    try:
+        data = json.loads(nuxt.string)
+    except Exception as e:
+        print(f"[操作日報] NUXT JSON 解析失敗 {etf_code}: {e}")
+        return None
+
+    cache_key = f"active-changes-{etf_code}"
+    entry_idx = None
+    for item in data:
+        if isinstance(item, dict) and cache_key in item:
+            entry_idx = item[cache_key]
+            break
+    if entry_idx is None:
+        return None
+
+    payload = _nuxt_resolve(data, entry_idx) or {}
+    latest = payload.get("latestDiff") or {}
+    from_date, to_date = latest.get("fromDate", ""), latest.get("toDate", "")
+
     result = {
-        "date_range": "", "add": 0, "buy": 0, "sell": 0, "remove": 0,
+        "date_range": f"{from_date} → {to_date}" if from_date and to_date else "",
+        "add": 0, "buy": 0, "sell": 0, "remove": 0,
         "buy_amount": 0.0, "sell_amount": 0.0, "changes": []
     }
-    text = soup.get_text()
 
-    date_m = re.search(r"(\d{4}-\d{2}-\d{2})\s*[→\->]+\s*(\d{4}-\d{2}-\d{2})", text)
-    if date_m:
-        result["date_range"] = f"{date_m.group(1)} → {date_m.group(2)}"
-
-    for key, pattern in [("add","新增"), ("buy","加碼"), ("sell","減碼"), ("remove","刪除")]:
-        m = re.search(pattern + r"\s*(\d+)", text)
-        if m:
-            result[key] = int(m.group(1))
-
-    amt_m = re.search(r"加碼\s*\+([\d.]+)\s*億.*?減碼\s*-([\d.]+)\s*億", text, re.DOTALL)
-    if amt_m:
-        result["buy_amount"]  = float(amt_m.group(1))
-        result["sell_amount"] = float(amt_m.group(2))
-
-    for table in soup.find_all("table"):
-        for row in table.find_all("tr"):
-            cols = row.find_all("td")
-            if len(cols) < 2:
-                continue
-            try:
-                cell0 = cols[0].get_text(strip=True)
-                code_m2 = re.match(r"(\d{4,6})", cell0)
-                if not code_m2:
-                    continue
-                code = code_m2.group(1)
-                name = cell0.replace(code, "").strip()
-                cell1 = cols[1].get_text(strip=True)
-                shares_m = re.search(r"([+-][\d,]+)\s*張", cell1)
-                shares = int(shares_m.group(1).replace(",","")) if shares_m else 0
-                amount_m = re.search(r"([+-][\d.]+\s*億|[+-][\d,]+\s*萬)", cell1)
-                amount_str = amount_m.group(1).strip() if amount_m else ""
-                type_str = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-                if type_str not in ["新增","加碼","減碼","刪除"]:
-                    type_str = "加碼" if shares > 0 else "減碼" if shares < 0 else ""
-                if code and type_str:
-                    result["changes"].append({
-                        "code": code, "name": name,
-                        "shares": shares, "amount": amount_str, "type": type_str
-                    })
-            except Exception:
-                continue
+    for ch in (latest.get("changes") or []):
+        type_str = _CHANGE_TYPE_LABEL.get(ch.get("type", ""))
+        if not type_str:
+            continue
+        shares = int((ch.get("sharesDelta") or 0) / 1000)
+        result["changes"].append({
+            "code": ch.get("code", ""), "name": ch.get("name", ""),
+            "shares": shares, "amount": "", "type": type_str
+        })
+        result[_CHANGE_TYPE_KEY[type_str]] += 1
 
     return result if (result["changes"] or result["date_range"]) else None
 
