@@ -88,7 +88,8 @@ ETF_ANNOUNCEMENT_SCHEDULE = {
 
 def get_announcement_label(etf_code):
     """根據公告時程判斷目前資料狀態，回傳標籤文字與類型"""
-        now = taipei_now()
+    now = taipei_now()
+    sch = ETF_ANNOUNCEMENT_SCHEDULE.get(etf_code, {"announce_hour": 16, "announce_min": 30})
     ah, am = sch["announce_hour"], sch["announce_min"]
     is_weekday = now.weekday() < 5
     announce_dt = now.replace(hour=ah, minute=am, second=0, microsecond=0)

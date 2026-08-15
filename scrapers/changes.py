@@ -256,11 +256,11 @@ def save_changes_snapshot(etf_code, changes):
 
 
 def get_period_buy_sell_summary(etf_code, period_start, period_end):
-        """彙總期間內加碼/減碼統計（依 etf_changes_history 每日快照加總）。"""
-        empty = {"buy": 0, "sell": 0, "buy_amount": 0.0, "sell_amount": 0.0, "stocks": []}
-        conn = get_db()
-        if not conn:
-            return empty
+    """彙總期間內加碼/減碼統計（依 etf_changes_history 每日快照加總）。"""
+    empty = {"buy": 0, "sell": 0, "buy_amount": 0.0, "sell_amount": 0.0, "stocks": []}
+    conn = get_db()
+    if not conn:
+        return empty
     try:
         cur = conn.cursor()
         cur.execute("""
