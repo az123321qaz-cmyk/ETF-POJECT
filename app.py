@@ -1207,6 +1207,63 @@ def get_all_trade_history(etf_code):
 
 
 
+@app.route("/api/debug/nuxt/<etf_code>", methods=["GET"])
+def debug_nuxt(etf_code):
+    """
+    臨時除錯端點：檢查 etfinfo.tw 頁面 __NUXT_DATA__ 的實際結構，
+    找出持股物件真正用的 key 名稱（例如是 code 還是 stockCode、weight 還是 ratio），
+    以及是否有內嵌多天期的歷史資料。查完問題後可以移除這個路由。
+    query: ?page=holdings（預設）或 ?page=active
+    """
+    import requests as rq
+    etf_code = etf_code.upper()
+    page = request.args.get("page", "holdings")
+    url = f"https://www.etfinfo.tw/etf/{etf_code}/{page}"
+    out = {"url": url}
+    try:
+        r = rq.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"},
+                    timeout=15)
+        out["status"] = r.status_code
+        soup = BeautifulSoup(r.text, "html.parser")
+        nuxt = soup.find("script", id="__NUXT_DATA__")
+        out["nuxt_found"] = bool(nuxt and nuxt.string)
+        if nuxt and nuxt.string:
+            raw = nuxt.string
+            out["nuxt_len"] = len(raw)
+            data = json.loads(raw)
+            out["data_len"] = len(data) if isinstance(data, list) else None
+
+            # 頂層可能含有意義的 asyncData cache key（字串裡含代號、active、holding、period 等字樣）
+            top_keys = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        for k in item.keys():
+                            if isinstance(k, str) and (
+                                etf_code in k or "active" in k.lower() or
+                                "holding" in k.lower() or "period" in k.lower() or
+                                "portfolio" in k.lower()
+                            ):
+                                top_keys.append(k)
+            out["top_level_candidate_keys"] = sorted(set(top_keys))[:40]
+
+            # 掃描含有 "code" 或 "stockCode" 的字典物件，列出各自出現過的 key 組合與次數
+            def _key_variants(field):
+                variants = {}
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and field in item:
+                            ks = tuple(sorted(str(k) for k in item.keys()))
+                            variants[ks] = variants.get(ks, 0) + 1
+                return {" / ".join(k): v for k, v in variants.items()}
+
+            out["code_key_variants"] = _key_variants("code")
+            out["stockCode_key_variants"] = _key_variants("stockCode")
+    except Exception as e:
+        out["error"] = str(e)
+    return jsonify(out)
+
+
 @app.route("/api/debug/holdings/<etf_code>", methods=["GET"])
 def debug_holdings(etf_code):
     """調試持股爬蟲"""
