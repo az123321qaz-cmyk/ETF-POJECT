@@ -424,6 +424,7 @@ def admin_delete_etf():
     ETF_CONFIG = get_etf_config()
     cache.pop(code, None)
     cache.pop(f"{code}_changes", None)
+    cache.pop("all_prices", None)  # 清除彙總快取，避免已刪除的 ETF 短時間內仍出現在 /api/prices
 
     render_auto = bool(os.environ.get("RENDER_API_KEY") and os.environ.get("RENDER_SERVICE_ID"))
     return jsonify({
@@ -1054,15 +1055,18 @@ def get_etf_changes(etf_code):
 @app.route("/api/etf/<etf_code>/changes/history", methods=["GET"])
 def get_etf_changes_history(etf_code):
     """
-    個股進出記錄（滾動視窗）。
-    week: 每次 7 天視窗；month: 每次 30 天視窗。
+    操作日報「近7天／近30天」：逐日列出區間內每一天下午公告的加減碼結果。
+    week: 過去7個日曆天（含當日）；month: 過去30個日曆天（含當日）。
     offset=0 為最近一期，offset=1 往前推一個視窗，以此類推。
+    資料來源為每日排程於公告時間擷取並存檔的 etf_changes_history 快照，
+    只有已經擷取到的日期才會出現在清單中。
     """
     etf_code = etf_code.upper()
     if etf_code not in ETF_CONFIG:
         return jsonify({"success": False, "error": f"不支援的ETF代號: {etf_code}"}), 404
 
-    from datetime import date as _date, timedelta as _td
+    from datetime import timedelta as _td
+    from scrapers.changes import get_daily_changes_range
     today = taipei_today()
     period = request.args.get("period", "week")
     try:
@@ -1070,8 +1074,9 @@ def get_etf_changes_history(etf_code):
     except ValueError:
         offset = 0
 
-    # 滾動視窗：week=7天，month=30天
-    window = _td(days=7) if period == "week" else _td(days=30)
+    # 滾動視窗：week=過去7天，month=過去30天（含視窗結束當天）
+    window_days = 7 if period == "week" else 30
+    window = _td(days=window_days)
     period_end   = today - window * offset
     period_start = period_end - window + _td(days=1)
 
@@ -1080,44 +1085,28 @@ def get_etf_changes_history(etf_code):
     else:
         period_label = f"{period_start.strftime('%Y/%m/%d')}～{period_end.strftime('%m/%d')}"
 
-    # 同步最新交易記錄（優先從 DB 快取，僅在 DB 無資料時才爬取）
-    conn_check = get_db()
-    db_empty = True
-    if conn_check:
+    days = get_daily_changes_range(etf_code, period_start, period_end)
+
+    # 視窗涵蓋今天時，若今天的快照還沒進資料庫（例如使用者還沒點過「今日」頁籤），
+    # 比照「今日」頁籤即時擷取一次，確保不用等排程時間到也能看到today
+    today_str = today.isoformat()
+    if offset == 0 and not any(d["trade_date"] == today_str for d in days):
         try:
-            _cc = conn_check.cursor()
-            _cc.execute("SELECT COUNT(*) FROM etf_trade_records WHERE etf_code=%s", (etf_code,))
-            db_empty = (_cc.fetchone()[0] == 0)
-        except Exception:
-            pass
-        finally:
-            conn_check.close()
-
-    if db_empty:
-        # 首次：同步等待，確保資料入庫後再查詢
-        sync_trade_records(etf_code)
-    elif offset == 0:
-        # 有資料：背景更新即可
-        threading.Thread(target=sync_trade_records, args=(etf_code,), daemon=True).start()
-
-    result = get_period_trade_changes(etf_code, period_start, period_end)
-    added   = result["added"]
-    removed = result["removed"]
-    _bs_summary = get_period_buy_sell_summary(etf_code, period_start, period_end)
-
-    def _fmt(s, action):
-        return {
-            "code": s["code"], "name": s["name"],
-            "shares": 0, "pct_change": 0,
-            "type": "新增" if action == "add" else "刪除",
-            "entry_date": s.get("entry_date"),
-            "exit_date":  s.get("exit_date"),
-            "holding_days": s.get("holding_days"),
-            "entry_price":  s.get("entry_price"),
-        }
-
-    changes = [_fmt(s, "add") for s in added] + [_fmt(s, "remove") for s in removed]
-    has_data = bool(changes)
+            _today_resp = get_etf_changes(etf_code)
+            _today_json = _today_resp.get_json() if hasattr(_today_resp, "get_json") else None
+            _td_data = (_today_json or {}).get("data") or {}
+            if _td_data.get("changes") or any(_td_data.get(k, 0) for k in ("add", "buy", "sell", "remove")):
+                days.insert(0, {
+                    "trade_date": today_str,
+                    "date_range": _td_data.get("date_range", ""),
+                    "add": _td_data.get("add", 0), "buy": _td_data.get("buy", 0),
+                    "sell": _td_data.get("sell", 0), "remove": _td_data.get("remove", 0),
+                    "buy_amount": _td_data.get("buy_amount", 0.0),
+                    "sell_amount": _td_data.get("sell_amount", 0.0),
+                    "changes": _td_data.get("changes", []),
+                })
+        except Exception as e:
+            print(f"[操作日報] {etf_code} 即時補抓今日資料失敗: {e}")
 
     return jsonify({
         "success": True,
@@ -1128,17 +1117,39 @@ def get_etf_changes_history(etf_code):
         "period_start": period_start.isoformat(),
         "period_end":   period_end.isoformat(),
         "offset": offset,
-        "trade_mode": True,
-        "has_data": has_data,
-        "data": [{
-            "trade_date": period_end.isoformat(),
-            "date_range": f"{period_start} → {period_end}",
-            "add": len(added), "buy": _bs_summary["buy"], "sell": _bs_summary["sell"], "remove": len(removed),
-            "buy_amount": _bs_summary["buy_amount"], "sell_amount": _bs_summary["sell_amount"],
-            "changes": changes,
-        "buy_sell_stocks": _bs_summary["stocks"]
-        }] if has_data else []
+        "has_data": bool(days),
+        "days": days,
     })
+
+
+@app.route("/api/etf/<etf_code>/changes/inception", methods=["GET"])
+def get_etf_changes_inception(etf_code):
+    """
+    操作日報「歷史資料」：從該檔 ETF 掛牌日起算至今日的完整個股進出場記錄。
+    直接沿用既有的 /changes/all 完整交易紀錄邏輯（資料本身即涵蓋自成立以來所有記錄），
+    並附上 inception_date 供前端顯示區間起點。
+    """
+    etf_code = etf_code.upper()
+    if etf_code not in ETF_CONFIG:
+        return jsonify({"success": False, "error": f"不支援的ETF代號: {etf_code}"}), 404
+
+    inception_date = ""
+    try:
+        etf_list = load_etf_list()
+        inception_date = next((e.get("inception_date", "") for e in etf_list if e["code"] == etf_code), "") or ""
+    except Exception:
+        pass
+
+    resp = get_all_trade_history(etf_code)
+    if isinstance(resp, tuple):
+        resp_obj, status_code = resp[0], resp[1]
+    else:
+        resp_obj, status_code = resp, 200
+    payload = resp_obj.get_json()
+    if isinstance(payload, dict):
+        payload["inception_date"] = inception_date
+        payload["period_label"] = f"{inception_date or '掛牌日'} ～ {taipei_today().isoformat()}"
+    return jsonify(payload), status_code
 
 
 @app.route("/api/etf/<etf_code>/changes/all", methods=["GET"])
@@ -1392,7 +1403,7 @@ def _update_live_prices():
             _is_trading = (now.weekday() < 5 and
                            (9*60) <= (now.hour*60 + now.minute) < (13*60+35))
             if _is_trading:
-                for _code in list(_prev_close_cache.keys()):
+                for _code in list(ETF_CONFIG.keys()):
                     try:
                         pd = scrape_moneydj_price(_code)
                         if pd and pd.get("price") and float(pd["price"]) > 0:
@@ -1422,7 +1433,7 @@ def _update_prev_close():
     # ── 服務啟動時立即初始化昨收快取（優先用 TWSE 倒數第二日收盤）──────
     print("[prev_close] 服務啟動，初始化昨收快取...")
     _init_cache = {}
-    for _code in list(_prev_close_cache.keys()):
+    for _code in list(ETF_CONFIG.keys()):
         try:
             from datetime import datetime as _dtt, timedelta as _tdd
             import urllib3 as _ul3; _ul3.disable_warnings()
@@ -1476,7 +1487,7 @@ def _update_prev_close():
                 if now.hour == 9 and now.minute == 1 and _last_open_date != today_str:
                     print("[prev_close] 09:01 開始更新昨收...")
                     new_cache = {}
-                    for _code in list(_prev_close_cache.keys()):
+                    for _code in list(ETF_CONFIG.keys()):
                         try:
                             pd = scrape_moneydj_price(_code)
                             if pd and pd.get("prev") and float(pd["prev"]) > 0:
@@ -1492,7 +1503,7 @@ def _update_prev_close():
                 elif now.hour == 13 and now.minute == 35 and _last_close_date != today_str:
                     print("[prev_close] 13:35 收盤後更新今日收盤價...")
                     new_cache = {}
-                    for _code in list(_prev_close_cache.keys()):
+                    for _code in list(ETF_CONFIG.keys()):
                         try:
                             pd = scrape_moneydj_price(_code)
                             if pd and pd.get("price") and float(pd["price"]) > 0:

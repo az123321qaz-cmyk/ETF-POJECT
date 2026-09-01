@@ -273,6 +273,53 @@ def save_changes_snapshot(etf_code, changes):
         print(f"[DB] save_changes_snapshot 失敗: {e}")
 
 
+def get_daily_changes_range(etf_code, start_date, end_date):
+    """
+    回傳期間內（含起訖日）逐日操作日報快照，依日期新到舊排序。
+    每一筆對應「當天下午公告」比對前一次揭露後的加減碼結果（來自 etf_changes_history，
+    由每日排程於公告時間擷取後寫入）。尚未擷取到快照的日期（例如假日、尚未公告、
+    或早於本功能開始每日存檔之前的日子）不會出現在清單中——這是資料來源的限制，
+    並非程式錯誤：etfinfo.tw 本身只提供「最新一次」異動明細，逐日歷史只能靠
+    我們自己每天存檔累積。
+    """
+    conn = get_db()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT trade_date, date_range, add_count, buy_count, sell_count,
+                   remove_count, buy_amount, sell_amount, changes_json
+            FROM etf_changes_history
+            WHERE etf_code=%s AND trade_date >= %s AND trade_date <= %s
+            ORDER BY trade_date DESC
+        """, (etf_code, str(start_date), str(end_date)))
+        rows = cur.fetchall()
+    except Exception as e:
+        print(f"[DB] get_daily_changes_range 失敗: {e}")
+        return []
+    finally:
+        conn.close()
+
+    days = []
+    for r in rows:
+        try:
+            changes = json.loads(r[8] or "[]")
+        except Exception:
+            changes = []
+        counts_sum = (r[2] or 0) + (r[3] or 0) + (r[4] or 0) + (r[5] or 0)
+        if counts_sum > 0 and not changes:
+            continue  # 快照壞資料（異動筆數與明細對不上），略過避免污染畫面
+        days.append({
+            "trade_date": str(r[0]),
+            "date_range": r[1] or "",
+            "add": r[2] or 0, "buy": r[3] or 0, "sell": r[4] or 0, "remove": r[5] or 0,
+            "buy_amount": float(r[6] or 0), "sell_amount": float(r[7] or 0),
+            "changes": changes,
+        })
+    return days
+
+
 def get_period_buy_sell_summary(etf_code, period_start, period_end):
     """彙總期間內加碼/減碼統計（依 etf_changes_history 每日快照加總）。"""
     empty = {"buy": 0, "sell": 0, "buy_amount": 0.0, "sell_amount": 0.0, "stocks": []}

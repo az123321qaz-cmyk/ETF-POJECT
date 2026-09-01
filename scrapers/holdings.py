@@ -3,6 +3,7 @@ ETF 持股爬蟲
 優先順序：MoneyDJ Basic0007B → etfinfo.tw NUXT → pocket.tw → 投信官網
 """
 import re
+import json
 import requests
 from bs4 import BeautifulSoup
 
@@ -92,6 +93,78 @@ def scrape_moneydj_holdings(etf_code):
     return unique if len(unique) >= 3 else None
 
 
+def _nuxt_resolve(data, ref, depth=0, seen=None):
+    """展開 Nuxt devalue 格式的索引參照為實際巢狀結構（與 scrapers/changes.py 相同邏輯）。"""
+    if seen is None:
+        seen = set()
+    if depth > 8:
+        return None
+    if isinstance(ref, int) and 0 <= ref < len(data):
+        if ref in seen:
+            return None
+        val = data[ref]
+        if isinstance(val, (str, int, float, bool)) or val is None:
+            return val
+        if isinstance(val, list):
+            return [_nuxt_resolve(data, v, depth + 1, seen | {ref}) for v in val]
+        if isinstance(val, dict):
+            return {k: _nuxt_resolve(data, v, depth + 1, seen | {ref}) for k, v in val.items()}
+        return val
+    return ref
+
+
+def _parse_nuxt_holdings_json(raw_str):
+    """
+    穩健版持股解析：直接解析 __NUXT_DATA__ 的 JSON（Nuxt devalue 格式），
+    掃描扁平陣列中每一個「本身就帶有 code/name/weight(或pct) 這幾個 key」的物件，
+    再展開其值（值可能是直接的字面量，也可能是指向陣列其他位置的索引參照）。
+    比起舊版正則表達式（假設 code/name/weight 一定以固定順序、字面量緊鄰出現在原始文字中），
+    這個做法不受欄位順序、是否被去重複參照化影響，較不容易因頁面實作細節不同而抓不到資料
+    （例如新上市 ETF 的頁面）。
+    """
+    try:
+        data = json.loads(raw_str)
+    except Exception as e:
+        print(f"[etfinfo NUXT] JSON 解析失敗: {e}")
+        return None
+    if not isinstance(data, list):
+        return None
+
+    holdings = []
+    seen_codes = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if "code" not in item or "name" not in item:
+            continue
+        if "weight" not in item and "pct" not in item:
+            continue
+        try:
+            resolved = {k: _nuxt_resolve(data, v) for k, v in item.items()}
+        except Exception:
+            continue
+        code = resolved.get("code")
+        name = resolved.get("name")
+        weight = resolved.get("weight", resolved.get("pct"))
+        if code is None or weight is None:
+            continue
+        code = str(code)
+        if not re.match(r"^\d{4,6}[A-Za-z]?$", code):
+            continue
+        try:
+            pct = round(float(weight), 3)
+        except (TypeError, ValueError):
+            continue
+        if pct <= 0 or pct > 100:
+            continue
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        holdings.append({"code": code, "name": str(name or ""), "pct": pct, "status": "hold"})
+
+    return holdings if len(holdings) >= 3 else None
+
+
 def scrape_etfinfo(etf_code):
     """
     完整持股爬蟲：
@@ -113,6 +186,14 @@ def scrape_etfinfo(etf_code):
             nuxt_script = soup.find("script", id="__NUXT_DATA__")
             if nuxt_script:
                 raw_str = nuxt_script.string or ""
+
+                # 優先：結構化 JSON 解析（較穩健）
+                etf_holdings = _parse_nuxt_holdings_json(raw_str)
+                if etf_holdings:
+                    print(f"[etfinfo NUXT-JSON] {etf_code}: 抓到 {len(etf_holdings)} 檔")
+                    return etf_holdings
+
+                # 備援：舊版正則（欄位剛好以固定順序緊鄰出現時仍可用）
                 holding_objs = re.findall(
                     r'"code":"(\d{4,6}[A-Za-z]?)","name":"([^"]+)","weight":([\d.]+)',
                     raw_str
@@ -129,7 +210,7 @@ def scrape_etfinfo(etf_code):
                             etf_holdings.append({"code": code, "name": name,
                                                  "pct": pct, "status": "hold"})
                     if len(etf_holdings) >= 3:
-                        print(f"[etfinfo NUXT] {etf_code}: 抓到 {len(etf_holdings)} 檔")
+                        print(f"[etfinfo NUXT-regex] {etf_code}: 抓到 {len(etf_holdings)} 檔")
                         return etf_holdings
     except Exception as e:
         print(f"[etfinfo NUXT] {etf_code} 失敗: {e}")
@@ -244,8 +325,25 @@ def scrape_capital(product_id):
     return holdings if holdings else None
 
 
-# 靜態備援資料（所有來源失敗時使用，資料日期 2026/05/27）
+# 靜態備援資料（所有來源失敗時使用，資料日期 2026/05/27，00410A為2026/08/31）
 FALLBACK = {
+    "00410A": [
+        {"code":"3008","name":"大立光","pct":8.29,"status":"hold"},
+        {"code":"2330","name":"台積電","pct":5.86,"status":"hold"},
+        {"code":"3491","name":"昇達科","pct":5.39,"status":"hold"},
+        {"code":"3017","name":"奇鋐","pct":5.19,"status":"hold"},
+        {"code":"6669","name":"緯穎","pct":4.99,"status":"hold"},
+        {"code":"3653","name":"健策","pct":4.86,"status":"hold"},
+        {"code":"3081","name":"聯亞","pct":4.78,"status":"hold"},
+        {"code":"2455","name":"全新","pct":4.60,"status":"hold"},
+        {"code":"2059","name":"川湖","pct":3.84,"status":"hold"},
+        {"code":"8996","name":"高力","pct":3.82,"status":"hold"},
+        {"code":"2383","name":"台光電","pct":3.56,"status":"hold"},
+        {"code":"3529","name":"力旺","pct":3.51,"status":"hold"},
+        {"code":"2454","name":"聯發科","pct":3.19,"status":"hold"},
+        {"code":"3665","name":"貿聯-KY","pct":3.17,"status":"hold"},
+        {"code":"2408","name":"南亞科","pct":2.94,"status":"hold"},
+    ],
     "00991A": [
         {"code":"2330","name":"台積電","pct":16.01,"status":"hold"},
         {"code":"2383","name":"台光電","pct":7.82,"status":"hold"},

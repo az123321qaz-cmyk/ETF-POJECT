@@ -404,7 +404,7 @@
       <button class="changes-subtab active" data-period="today" onclick="switchChangesPeriod('today')">今日</button>
       <button class="changes-subtab" data-period="week" onclick="switchChangesPeriod('week')">近7天</button>
       <button class="changes-subtab" data-period="month" onclick="switchChangesPeriod('month')">近30天</button>
-      <button class="changes-subtab-history" onclick="openTradeHistory()">📋 歷史記錄</button>
+      <button class="changes-subtab" data-period="inception" onclick="switchChangesPeriod('inception')">歷史資料</button>
     </div>
     <div id="changes-content">
       <div class="loading"><div class="spinner"></div>載入操作日報中...</div>
@@ -557,13 +557,22 @@ function updateClock() {
 
 async function loadFromAPI() {
   try {
-    const r = await fetch(API + "/etf/all", { signal: AbortSignal.timeout(8000) });
+    // 逐檔即時爬蟲可能較久，拉長逾時時間以避免誤觸備援資料
+    const r = await fetch(API + "/etf/all", { signal: AbortSignal.timeout(25000) });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const json = await r.json();
     if (!json.success) throw new Error("API error");
+
+    // 以本次回傳的清單為準，移除已不存在的舊代碼（例如已被刪除的 ETF），
+    // 避免 forceRefresh() 或先前 demo fallback 殘留的舊資料一直留在畫面上
+    const freshCodes = new Set(Object.keys(json.data));
+    Object.keys(allData).forEach(code => {
+      if (!freshCodes.has(code)) delete allData[code];
+    });
+
     Object.entries(json.data).forEach(([code, d]) => {
       if (d.success) {
-        // 用 DEMO_ETF 補上後端沒有的 nav/aum/navChange/note
+        // 用 DEMO_ETF 補上後端沒有的 nav/aum/navChange/note（若沒有對應示範資料則留空，不影響顯示）
         const demo = DEMO_ETF[code] || {};
         allData[code] = {
           nav: demo.nav,
@@ -579,12 +588,38 @@ async function loadFromAPI() {
     document.getElementById("alert-demo").classList.remove("show");
     return true;
   } catch (e) {
-    console.warn("API 連線失敗，使用示範資料:", e.message);
+    console.warn("API 連線失敗，改用目前實際 ETF 清單 + 示範資料:", e.message);
     usingDemo = true;
     document.getElementById("alert-demo").classList.add("show");
-    Object.entries(DEMO_ETF).forEach(([code, d]) => {
+
+    // /api/etf/list 只查資料庫、不爬蟲，速度快很多，用它取得「目前真正有效」的 ETF 清單，
+    // 避免寫死的 DEMO_ETF（可能包含已刪除的 ETF、缺少新增的 ETF）造成清單跟後台不一致
+    let liveList = null;
+    try {
+      const lr = await fetch(API + "/etf/list", { signal: AbortSignal.timeout(6000) });
+      const lj = await lr.json();
+      if (lj && lj.success) liveList = lj.data;
+    } catch (e2) {
+      console.warn("取得 ETF 清單失敗，改用內建清單:", e2.message);
+    }
+
+    const codes = liveList ? liveList.map(x => x.code) : Object.keys(DEMO_ETF);
+
+    // 移除不在最新清單內的舊資料
+    Object.keys(allData).forEach(code => {
+      if (!codes.includes(code)) delete allData[code];
+    });
+
+    codes.forEach(code => {
+      const meta = (liveList || []).find(x => x.code === code) || {};
+      const demo = DEMO_ETF[code] || {};
       allData[code] = {
-        ...d, code, source:"demo",
+        code,
+        name: meta.name || demo.name || code,
+        issuer: meta.issuer || demo.issuer || "",
+        nav: demo.nav, navChange: demo.navChange, aum: demo.aum, note: demo.note,
+        total_holdings: demo.total_holdings || 0,
+        source: "demo",
         updated_at: new Date().toLocaleString("zh-TW"),
         holdings: FALLBACK_HOLDINGS[code] || []
       };
@@ -1334,8 +1369,17 @@ async function loadChanges() {
     } catch(e) {
       renderChangesFallback();
     }
+  } else if (_changesPeriod === 'inception') {
+    // 歷史資料：自該檔 ETF 掛牌日起算至今日的完整進出場記錄
+    try {
+      const json = await fetch('/api/etf/' + code + '/changes/inception').then(r => r.json());
+      if (!json.success) throw new Error(json.error || 'API error');
+      renderChangesInception(json);
+    } catch(e) {
+      el.innerHTML = '<div class="error-msg">歷史資料載入失敗，請稍後再試</div>';
+    }
   } else {
-    // week or month — support offset for period navigation
+    // week or month — 逐日清單，支援 offset 切換上一/下一個視窗
     try {
       const offset = _changesOffset || 0;
       const json = await fetch('/api/etf/' + code + '/changes/history?period=' + _changesPeriod + '&offset=' + offset).then(r => r.json());
@@ -1434,6 +1478,19 @@ function _tradeRow(c) {
   '</tr>';
 }
 
+function _changeDayRow(c) {
+  const typeLabel = { '新增':'新增', '加碼':'加碼', '減碼':'減碼', '刪除':'清倉' };
+  const typeClass = { '新增':'tag tag-add', '加碼':'tag tag-buy', '減碼':'tag tag-sell', '刪除':'tag tag-remove' };
+  return '<tr>' +
+    '<td style="font-family:monospace;font-size:13px;font-weight:600">' + c.code + '</td>' +
+    '<td>' + (c.name || '') + '</td>' +
+    '<td style="text-align:right;font-variant-numeric:tabular-nums;color:' + (c.shares > 0 ? 'var(--red)' : 'var(--green)') + '">' + (c.shares > 0 ? '+' : '') + (c.shares || 0).toLocaleString() + ' 張</td>' +
+    '<td style="text-align:right;font-size:13px;color:var(--text2)">' + (c.amount || '—') + '</td>' +
+    '<td><span class="' + (typeClass[c.type] || 'tag tag-hold') + '">' + (typeLabel[c.type] || c.type) + '</span></td>' +
+  '</tr>';
+}
+
+// 近7天／近30天：逐日清單（每一天＝當天下午公告後與前一次揭露相比的加減碼結果）
 function renderChangesHistory(json) {
   const el = document.getElementById('changes-content');
   if (!el) return;
@@ -1441,7 +1498,7 @@ function renderChangesHistory(json) {
   const periodLabel = json.period === 'month' ? '月' : '週';
   const label = json.period_label || (json.period_start + ' ~ ' + json.period_end);
   const offset = json.offset || 0;
-  const data = json.data || [];
+  const days = json.days || [];
 
   const btnStyle = 'padding:4px 14px;border:1px solid var(--border);border-radius:6px;background:var(--card);cursor:pointer;font-size:13px';
   const nav = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">' +
@@ -1452,36 +1509,74 @@ function renderChangesHistory(json) {
       : '<span style="width:88px"></span>') +
   '</div>';
 
-  if (!data.length) {
+  if (!days.length) {
     el.innerHTML = nav +
-      '<div class="empty-state">📭 此區間無進出異動記錄<br>' +
-      '<small style="color:var(--text2)">可點「◀ 上一' + periodLabel + '」往前查歷史，或點「📋 歷史記錄」查看完整記錄</small></div>';
+      '<div class="empty-state">📭 此區間尚無每日公告快照<br>' +
+      '<small style="color:var(--text2)">可點「◀ 上一' + periodLabel + '」往前查看，或切換「歷史資料」查看自掛牌日以來的完整記錄</small></div>';
     return;
   }
 
-  const day = data[0];
-  const changes = day.changes || [];
-  const added   = changes.filter(c => c.type === '新增');
-  const removed = changes.filter(c => c.type === '刪除');
+  const thead = '<thead><tr><th>代號</th><th>名稱</th><th style="text-align:right">張數變動</th><th style="text-align:right">估算金額</th><th>操作</th></tr></thead>';
 
   let html = nav;
+  days.forEach(day => {
+    const total = (day.add||0) + (day.buy||0) + (day.sell||0) + (day.remove||0);
+    const changes = day.changes || [];
+    if (total === 0) {
+      html += '<div class="card" style="margin-top:8px;padding:10px 16px;display:flex;align-items:center;gap:10px">' +
+        '<strong style="font-size:13px">' + day.trade_date + '</strong>' +
+        '<span style="font-size:12px;color:var(--text2)">當日無異動</span></div>';
+      return;
+    }
+    html += '<details class="card" style="margin-top:8px">' +
+      '<summary style="cursor:pointer;padding:2px 0;font-size:13px;font-weight:600">' +
+        day.trade_date +
+        '　<span class="add-color">新增 ' + (day.add||0) + '</span>' +
+        '　<span class="buy-color">加碼 ' + (day.buy||0) + '</span>' +
+        '　<span class="sell-color">減碼 ' + (day.sell||0) + '</span>' +
+        '　<span class="remove-color">刪除 ' + (day.remove||0) + '</span>' +
+      '</summary>' +
+      '<div class="table-wrap" style="margin-top:10px"><table>' + thead + '<tbody>' +
+        changes.map(_changeDayRow).join('') +
+      '</tbody></table></div>' +
+    '</details>';
+  });
+
+  el.innerHTML = html;
+}
+
+// 歷史資料：自該檔 ETF 掛牌日起算至今日的完整個股進出場記錄
+function renderChangesInception(json) {
+  const el = document.getElementById('changes-content');
+  if (!el) return;
+  const recs = json.records || [];
+  const label = json.period_label || ((json.inception_date || '掛牌日') + ' ～ 今日');
+
+  if (!recs.length) {
+    el.innerHTML = '<div class="empty-state">📭 尚無歷史記錄，請稍後再試</div>';
+    return;
+  }
+
+  const totalClosed = recs.filter(r => r.is_closed).length;
+  const totalOpen = recs.length - totalClosed;
+
+  let html = '<div style="font-size:13px;color:var(--text2);margin-bottom:12px">追蹤區間：<strong style="color:var(--text)">' + label + '</strong></div>';
   html += '<div class="change-cards">' +
-    '<div class="change-card"><div class="change-card-label">新增進場</div><div class="change-card-val add-color">' + added.length + '</div><div class="change-card-sub">檔</div></div>' +
-    '<div class="change-card"><div class="change-card-label">清倉出場</div><div class="change-card-val remove-color">' + removed.length + '</div><div class="change-card-sub">檔</div></div>' +
-    '<div class="change-card"><div class="change-card-label">加碼</div><div class="change-card-val buy-color">' + (day.buy||0) + '</div><div class="change-card-sub">檔</div></div>' +
-    '<div class="change-card"><div class="change-card-label">減碼</div><div class="change-card-val sell-color">' + (day.sell||0) + '</div><div class="change-card-sub">檔</div></div>' +
+    '<div class="change-card"><div class="change-card-label">總筆數</div><div class="change-card-val">' + recs.length + '</div><div class="change-card-sub">檔次</div></div>' +
+    '<div class="change-card"><div class="change-card-label">已出場</div><div class="change-card-val remove-color">' + totalClosed + '</div><div class="change-card-sub">檔次</div></div>' +
+    '<div class="change-card"><div class="change-card-label">持有中</div><div class="change-card-val add-color">' + totalOpen + '</div><div class="change-card-sub">檔次</div></div>' +
   '</div>';
 
   const thead = '<thead><tr><th>代號</th><th>名稱</th><th>進場日</th><th>出場日/狀態</th><th>操作</th></tr></thead>';
+  const rows = recs.map(r => _tradeRow({
+    code: r.code, name: r.name,
+    entry_date: r.entry_date, entry_price: r.entry_price,
+    exit_date: r.exit_date, holding_days: r.holding_days,
+    type: r.is_closed ? '刪除' : '新增',
+  })).join('');
 
-    if (added.length) {
-    html += '<div class="card" style="margin-top:12px"><div class="card-title">進場個股（' + added.length + ' 檔）</div>' +
-      '<div class="table-wrap"><table>' + thead + '<tbody>' + added.map(_tradeRow).join('') + '</tbody></table></div></div>';
-  }
-  if (removed.length) {
-    html += '<div class="card" style="margin-top:12px"><div class="card-title">出場個股（' + removed.length + ' 檔）</div>' +
-      '<div class="table-wrap"><table>' + thead + '<tbody>' + removed.map(_tradeRow).join('') + '</tbody></table></div></div>';
-  }
+  html += '<div class="card" style="margin-top:12px"><div class="card-title">個股進出記錄（共 ' + recs.length + ' 筆）</div>' +
+    '<div class="table-wrap"><table>' + thead + '<tbody>' + rows + '</tbody></table></div></div>';
 
   el.innerHTML = html;
 }
