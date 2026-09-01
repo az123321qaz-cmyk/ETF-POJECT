@@ -8,6 +8,8 @@ import bcrypt
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
 # 台北時區（避免伺服器預設 UTC 時區造成日期/時間誤判，例如快取日期算錯一天）
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 
