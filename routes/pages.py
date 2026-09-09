@@ -40,9 +40,5 @@ def index():
         return redirect("/login")
     html = _serve_html("index.html")
     if html:
-        html = html.replace(
-            'const API = "https://etf-tracker-1.onrender.com/api";',
-            'const API = "/api";'
-        )
         return Response(html, mimetype="text/html")
     return "ETF Tracker - index.html not found", 404
