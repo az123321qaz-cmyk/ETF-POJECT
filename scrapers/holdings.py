@@ -148,9 +148,16 @@ def _parse_nuxt_holdings_json(raw_str):
         weight = resolved.get("weight", resolved.get("pct"))
         if code is None or weight is None:
             continue
-        code = str(code)
-        if not re.match(r"^\d{4,6}[A-Za-z]?$", code):
+        code = str(code).strip()
+        # 海外成分股代號格式為「數字代號 國別」（例如 "4062 JP"、"007660 KP"），
+        # 取出數字代號另存，國別附註在名稱後方，避免被下方純數字代號的規則過濾掉
+        code_match = re.match(r"^(\d{4,6}[A-Za-z]?)(?:\s+([A-Za-z]{2}))?$", code)
+        if not code_match:
             continue
+        code, country = code_match.group(1), code_match.group(2)
+        country_label = {"JP": "日", "KP": "韓", "KQ": "韓", "KR": "韓"}.get(country, "")
+        if country_label and name:
+            name = f"{name}（{country_label}）"
         try:
             pct = round(float(weight), 3)
         except (TypeError, ValueError):
